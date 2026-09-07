@@ -480,6 +480,8 @@ impl Monitoring {
 pub struct Sources {
     pub excluded: HashSet<String>,
     pub tokens: ApiTokens,
+    /// Print the credential inventory and exit.
+    pub list_keys: bool,
     /// Seconds any single source request may take.
     pub timeout: u64,
     /// Seconds the whole discovery phase may spend, or 0 for no limit.
@@ -492,6 +494,7 @@ impl Default for Sources {
     fn default() -> Self {
         Self {
             excluded: HashSet::new(),
+            list_keys: false,
             tokens: ApiTokens::default(),
             timeout: builder::DEFAULT_SOURCE_TIMEOUT,
             budget: builder::DEFAULT_SOURCE_BUDGET,

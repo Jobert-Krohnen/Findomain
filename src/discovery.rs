@@ -6,7 +6,7 @@
 
 use {
     crate::{
-        config::Config,
+        config::{Config, CREDENTIAL_KEYS},
         filters::validate_subdomain,
         sources::{self, crtsh, BufferoverTier, SourceContext},
         utils::random_from,
@@ -173,6 +173,48 @@ fn bufferover_paid(
     sources::bufferover(context, target, BufferoverTier::Paid, api_key)
 }
 
+/// One source that takes a credential, and what is configured for it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyEntry {
+    pub source: &'static str,
+    /// Key in the configuration file.
+    pub setting: &'static str,
+    /// Environment variable that sets the same thing.
+    pub env: String,
+    /// Credentials configured for it; several can be rotated through.
+    pub configured: usize,
+    /// Whether the source answers nothing without one.
+    pub required: bool,
+}
+
+/// Reports whether `id` only ever answers with an error when no credential
+/// is configured.
+fn requires_key(id: &str) -> bool {
+    KEYED_SOURCES
+        .iter()
+        .any(|(source, _, required)| *source == id && *required)
+}
+
+/// Every source that takes a credential, with what is configured for it.
+///
+/// Only counts, never values: this exists to be printed, and a terminal
+/// scrollback or a CI log is no place for forty API keys.
+#[must_use]
+pub fn key_inventory(config: &Config) -> Vec<KeyEntry> {
+    let mut entries: Vec<KeyEntry> = CREDENTIAL_KEYS
+        .iter()
+        .map(|(source, setting)| KeyEntry {
+            source,
+            setting,
+            env: format!("FINDOMAIN_{}", setting.to_uppercase()),
+            configured: config.sources.tokens.get(source).len(),
+            required: requires_key(source),
+        })
+        .collect();
+    entries.sort_unstable_by_key(|entry| entry.source);
+    entries
+}
+
 /// Every source identifier accepted by `--exclude-sources`.
 #[must_use]
 pub fn all_source_ids() -> Vec<&'static str> {
@@ -187,7 +229,7 @@ pub fn all_source_ids() -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, crate::config::CREDENTIAL_KEYS};
+    use super::*;
 
     fn config_excluding(excluded: &[&str]) -> Config {
         let mut config = Config::default();
@@ -249,6 +291,43 @@ mod tests {
             .tokens
             .set("hackertarget", vec!["key".to_owned()]);
         assert_eq!(jobs(&config, "example.com").len(), baseline);
+    }
+
+    #[test]
+    fn the_key_inventory_covers_every_credential_and_knows_which_are_required() {
+        let inventory = key_inventory(&Config::default());
+        assert_eq!(inventory.len(), CREDENTIAL_KEYS.len());
+        assert!(
+            inventory
+                .windows(2)
+                .all(|pair| pair[0].source < pair[1].source),
+            "sorted by source"
+        );
+
+        let entry = |id: &str| inventory.iter().find(|e| e.source == id).expect(id).clone();
+        assert!(entry("shodan").required);
+        // These two run without a key and only use one to lift their quota.
+        assert!(!entry("certspotter").required);
+        assert!(!entry("hackertarget").required);
+
+        assert_eq!(entry("shodan").setting, "shodan_api_key");
+        assert_eq!(entry("shodan").env, "FINDOMAIN_SHODAN_API_KEY");
+        assert!(inventory.iter().all(|e| e.configured == 0));
+    }
+
+    #[test]
+    fn configured_keys_are_counted_not_carried() {
+        let mut config = Config::default();
+        config.sources.tokens.set(
+            "netlas",
+            vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
+        );
+        let entry = key_inventory(&config)
+            .into_iter()
+            .find(|e| e.source == "netlas")
+            .expect("netlas");
+        assert_eq!(entry.configured, 3);
+        assert!(!format!("{entry:?}").contains("one"), "no value leaks");
     }
 
     #[test]

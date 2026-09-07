@@ -36,6 +36,11 @@ pub fn run(config: &Config) -> Result<()> {
         ));
     }
 
+    if config.sources.list_keys {
+        print!("{}", render_key_table(&discovery::key_inventory(config)));
+        std::process::exit(0)
+    }
+
     if config.input.validate_only {
         return validate_files(config);
     }
@@ -49,6 +54,53 @@ pub fn run(config: &Config) -> Result<()> {
     } else {
         fatal("Error: Target is empty or invalid!")
     }
+}
+
+/// Lays the credential inventory out as a table, one source per line.
+///
+/// Values never appear here, only whether something is set and how many.
+fn render_key_table(entries: &[discovery::KeyEntry]) -> String {
+    const HEADERS: [&str; 3] = ["SOURCE", "CONFIG KEY", "ENVIRONMENT VARIABLE"];
+    let width = |header: &str, column: fn(&discovery::KeyEntry) -> usize| {
+        entries
+            .iter()
+            .map(column)
+            .max()
+            .unwrap_or(0)
+            .max(header.len())
+    };
+    let source = width(HEADERS[0], |e| e.source.len());
+    let setting = width(HEADERS[1], |e| e.setting.len());
+    let env = width(HEADERS[2], |e| e.env.len());
+
+    let mut table = format!(
+        "{:<source$}  {:<setting$}  {:<env$}  STATUS\n",
+        HEADERS[0], HEADERS[1], HEADERS[2]
+    );
+    for entry in entries {
+        let status = match (entry.configured, entry.required) {
+            (0, true) => "not set, source skipped".to_owned(),
+            (0, false) => "not set, source runs anyway".to_owned(),
+            (1, _) => "1 key".to_owned(),
+            (count, _) => format!("{count} keys"),
+        };
+        table += &format!(
+            "{:<source$}  {:<setting$}  {:<env$}  {status}\n",
+            entry.source, entry.setting, entry.env
+        );
+    }
+
+    let configured = entries.iter().filter(|e| e.configured > 0).count();
+    table += &format!(
+        "
+{} sources take a key, {configured} configured. Values are never shown.
+\
+         A source marked skipped does not run at all without a key; the others run without one \
+         and use it to lift their quota.
+",
+        entries.len()
+    );
+    table
 }
 
 /// Prints the valid subdomains of the input files and exits.
@@ -434,6 +486,35 @@ mod tests {
 
         config.output.file_name = "all.txt".to_owned();
         assert_eq!(target_file_name(&config, "example.com"), "all.txt");
+    }
+
+    #[test]
+    fn the_key_table_reports_presence_and_never_a_value() {
+        let mut config = Config::default();
+        config.sources.tokens.set(
+            "shodan",
+            vec!["supersecretvalue".to_owned(), "anothersecret".to_owned()],
+        );
+        let table = render_key_table(&discovery::key_inventory(&config));
+
+        assert!(!table.contains("supersecretvalue"));
+        assert!(!table.contains("anothersecret"));
+        let row = |id: &str| {
+            table
+                .lines()
+                .find(|line| line.starts_with(id))
+                .unwrap_or_else(|| panic!("{id} row"))
+                .to_owned()
+        };
+        assert!(row("shodan").ends_with("2 keys"), "{}", row("shodan"));
+        assert!(row("alienvault").ends_with("not set, source skipped"));
+        assert!(row("certspotter").ends_with("not set, source runs anyway"));
+        assert!(table.contains("FINDOMAIN_SHODAN_API_KEY"));
+        assert!(table.contains("1 configured. Values are never shown."));
+        assert!(table.ends_with(
+            "lift their quota.
+"
+        ));
     }
 
     #[test]

@@ -418,6 +418,22 @@ fn automatic_output_derives_the_file_name_and_rotates_it() {
 }
 
 #[test]
+fn list_keys_shows_every_credentialed_source_without_needing_a_target() {
+    let dir = TempDir::new("list_keys");
+    let run = run_in(&dir, &["--list-keys"]);
+
+    assert_eq!(run.code, 0);
+    // stdout_lines() sorts, so only membership is checked here.
+    let lines = run.stdout_lines();
+    assert!(lines.iter().any(|l| l.starts_with("SOURCE")));
+    assert!(lines
+        .iter()
+        .any(|l| l.starts_with("alienvault") && l.contains("FINDOMAIN_ALIENVAULT_API_KEY")));
+    assert!(lines.iter().any(|l| l.starts_with("shodan")));
+    assert!(lines.iter().any(|l| l.contains("42 sources take a key")));
+}
+
+#[test]
 fn validate_prints_only_syntactically_valid_domains() {
     let dir = TempDir::new("validate");
     dir.write(

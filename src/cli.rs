@@ -223,6 +223,10 @@ pub struct Cli {
     #[clap(long = "validate", requires = "files", conflicts_with_all = &["target", "stdin"])]
     pub validate_subdomains: bool,
 
+    /// List every source that takes an API key, how to set it, and whether one is configured. Values are never shown.
+    #[clap(long = "list-keys")]
+    pub list_keys: bool,
+
     /// Timeout in seconds for the resolver. Default 3.
     #[clap(long = "resolver-timeout")]
     pub resolver_timeout: Option<u64>,

@@ -368,6 +368,7 @@ fn monitoring(cli: &Cli, settings: &Settings) -> Monitoring {
 
 fn sources(cli: &Cli, settings: &Settings) -> Sources {
     Sources {
+        list_keys: cli.list_keys,
         excluded: if cli.exclude_sources.is_empty() {
             settings.list("exclude_sources")
         } else {

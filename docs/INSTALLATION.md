@@ -210,6 +210,10 @@ To update Findomain to latest version, please consider one of the following scen
 
 In this section you can found the steps about how to configure APIs that need or can be used with access tokens.
 
+Run `findomain --list-keys` to see every source that takes a key, the
+configuration key and environment variable that set it, and whether one is
+configured. Values are never printed.
+
 # Configuring the Facebook API
 
 **History**
