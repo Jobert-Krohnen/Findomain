@@ -24,6 +24,9 @@ telegram_chat_id: ""
 # Webhook that receives nuclei findings instead of the ones above, so they can
 # land in their own channel. Discord or Slack, told apart by the URL
 smart_alerts_webhook: ""
+# Seconds to keep waiting on a webhook rate limit for one message before
+# dropping it. 0 waits for as long as the service asks. Default 0
+webhook_max_wait: ""
 # SMTP server used to email the monitoring report
 smtp_server: ""
 # SMTP port. 465 uses implicit TLS, anything else STARTTLS. Default 587

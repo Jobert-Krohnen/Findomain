@@ -14,15 +14,24 @@ use {
         utils::random_from,
         webhooks::{self, Message},
     },
-    reqwest::{blocking::Client, header::USER_AGENT, StatusCode},
+    reqwest::{
+        blocking::Client,
+        header::{HeaderMap, RETRY_AFTER, USER_AGENT},
+        StatusCode, Url,
+    },
     std::{
         collections::{HashMap, HashSet},
         net::IpAddr,
+        thread,
         time::Duration,
     },
 };
 
 const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wait used when a 429 comes without a usable Retry-After: Discord's burst
+/// window, the shortest that is known to clear.
+const RATE_LIMIT_DEFAULT_WAIT: Duration = Duration::from_secs(2);
 
 /// Statuses that mean the webhook took too long rather than that the data was
 /// rejected, so `--mtimeout` can still commit the results.
@@ -209,23 +218,88 @@ fn push_to_webhooks(
 /// # Errors
 ///
 /// Fails when the request itself could not be made.
+/// Posts `message`, waiting out the service's rate limit when it asks.
+///
+/// A 429 is not a rejection of the data, only of the moment, so the post is
+/// retried after the `Retry-After` the service sent, for as long as it keeps
+/// asking. Discord allows five requests per two seconds on a webhook and a
+/// first run with a thousand subdomains is fourteen messages, so a run of
+/// short waits is the normal case. `webhook_max_wait` puts a ceiling on the
+/// total wait per message for whoever wants one. Any other refusal is
+/// reported and the message is dropped.
 fn post(config: &Config, client: &Client, message: &Message) -> Result<bool> {
-    let response = client
-        .post(&message.url)
-        .header(USER_AGENT, random_from(&config.http.user_agents))
-        .json(&message.body)
-        .send()?;
+    let cap = (config.monitoring.webhook_max_wait > 0)
+        .then(|| Duration::from_secs(config.monitoring.webhook_max_wait));
+    let mut attempt = 0u32;
+    let mut waited = Duration::ZERO;
+    loop {
+        let response = client
+            .post(&message.url)
+            .header(USER_AGENT, random_from(&config.http.user_agents))
+            .json(&message.body)
+            .send()?;
+        let status = response.status();
 
-    if accepted(response.status(), config.monitoring.push_on_timeout) {
-        return Ok(true);
+        if accepted(status, config.monitoring.push_on_timeout) {
+            return Ok(true);
+        }
+
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let wait = retry_after(response.headers()).unwrap_or(RATE_LIMIT_DEFAULT_WAIT);
+            if cap.is_some_and(|cap| waited + wait > cap) {
+                if !config.general.quiet {
+                    eprintln!(
+                        "The webhook at {} kept rate limiting us past webhook_max_wait ({}s); giving up on this message.",
+                        host_of(&message.url),
+                        config.monitoring.webhook_max_wait
+                    );
+                }
+                return Ok(false);
+            }
+            attempt += 1;
+            waited += wait;
+            if !config.general.quiet {
+                eprintln!(
+                    "The webhook at {} is rate limiting us, waiting {:.1}s before retrying (attempt {attempt}).",
+                    host_of(&message.url),
+                    wait.as_secs_f64()
+                );
+            }
+            thread::sleep(wait);
+            continue;
+        }
+
+        eprintln!(
+            "\nAn error occurred when Findomain tried to publish the data to the following webhook {}. \nError description: {status}",
+            message.url
+        );
+        return Ok(false);
     }
+}
 
-    eprintln!(
-        "\nAn error occurred when Findomain tried to publish the data to the following webhook {}. \nError description: {}",
-        message.url,
-        response.status()
-    );
-    Ok(false)
+/// Reads a `Retry-After` given in seconds, whole or fractional.
+///
+/// The header may also carry an HTTP date, which none of the chat services
+/// send; that form is treated as absent and gets the default wait.
+fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get(RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(Duration::from_secs_f64)
+}
+
+/// The host part of a webhook URL, which is all the log needs: the path
+/// carries the webhook's secret token.
+fn host_of(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "the webhook".to_owned())
 }
 
 /// Reports whether `status` means the alert can be considered delivered.
@@ -237,7 +311,19 @@ fn accepted(status: StatusCode, push_on_timeout: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, fhc::structs::HttpData};
+    use {
+        super::*,
+        fhc::structs::HttpData,
+        std::{
+            io::{BufRead, BufReader, Read, Write},
+            net::TcpListener,
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc,
+            },
+            time::Instant,
+        },
+    };
 
     fn data(ip: &str, http_status: &str, ports: &[i32]) -> ResolvData {
         ResolvData {
@@ -260,6 +346,141 @@ mod tests {
         assert!(accepted(StatusCode::GATEWAY_TIMEOUT, true));
         assert!(!accepted(StatusCode::INTERNAL_SERVER_ERROR, true));
         assert!(!accepted(StatusCode::FORBIDDEN, true));
+    }
+
+    /// Answers each connection with the next scripted status, counting the
+    /// requests. Just enough HTTP to satisfy the client.
+    fn stub_webhook(script: Vec<(u16, Option<&'static str>)>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}/hook", listener.local_addr().expect("addr"));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        thread::spawn(move || {
+            for (status, retry_after) in script {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let mut line = String::new();
+                let mut content_length = 0usize;
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                let _ = reader.read_exact(&mut body);
+                counter.fetch_add(1, Ordering::SeqCst);
+
+                let retry = retry_after.map_or(String::new(), |s| format!("Retry-After: {s}\r\n"));
+                let reason = if status == 200 {
+                    "OK"
+                } else {
+                    "Too Many Requests"
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\n{retry}Content-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.flush();
+            }
+        });
+        (url, hits)
+    }
+
+    fn quiet_config() -> Config {
+        let mut config = Config::default();
+        config.general.quiet = true;
+        config.http.user_agents = vec!["findomain-test".to_owned()];
+        config
+    }
+
+    fn message_to(url: String) -> Message {
+        Message {
+            url,
+            body: HashMap::from([("content", "hello".to_owned())]),
+        }
+    }
+
+    #[test]
+    fn a_rate_limited_post_waits_out_retry_after_and_goes_through() {
+        let (url, hits) = stub_webhook(vec![(429, Some("1")), (200, None)]);
+        let started = Instant::now();
+
+        let delivered =
+            post(&quiet_config(), &webhook_client(), &message_to(url)).expect("no transport error");
+
+        assert!(delivered);
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "one retry");
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "did not wait: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn rate_limit_waits_are_honoured_for_as_long_as_the_service_asks() {
+        // Seven refusals before the service relents; nothing here decides to
+        // stop early, the service does.
+        let mut script = vec![(429, Some("0")); 7];
+        script.push((200, None));
+        let (url, hits) = stub_webhook(script);
+
+        let delivered =
+            post(&quiet_config(), &webhook_client(), &message_to(url)).expect("no transport error");
+
+        assert!(delivered);
+        assert_eq!(hits.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn a_configured_ceiling_gives_up_once_the_next_wait_would_pass_it() {
+        // One second of budget: the first wait of one second fits, the second
+        // would take the total to two, so the message is dropped then.
+        let (url, hits) = stub_webhook(vec![(429, Some("1")); 4]);
+        let mut config = quiet_config();
+        config.monitoring.webhook_max_wait = 1;
+
+        let delivered =
+            post(&config, &webhook_client(), &message_to(url)).expect("no transport error");
+
+        assert!(!delivered);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn retry_after_is_seconds_and_anything_else_means_the_default() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(retry_after(&headers), None);
+
+        headers.insert(RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(retry_after(&headers), Some(Duration::from_secs(2)));
+
+        headers.insert(RETRY_AFTER, "1.5".parse().unwrap());
+        assert_eq!(retry_after(&headers), Some(Duration::from_millis(1500)));
+
+        headers.insert(
+            RETRY_AFTER,
+            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after(&headers), None);
+
+        headers.insert(RETRY_AFTER, "-3".parse().unwrap());
+        assert_eq!(retry_after(&headers), None);
+    }
+
+    #[test]
+    fn the_log_names_the_host_and_never_the_token_in_the_path() {
+        assert_eq!(
+            host_of("https://discord.com/api/webhooks/123/sEcReTtOkEn"),
+            "discord.com"
+        );
+        assert_eq!(host_of("not a url"), "the webhook");
     }
 
     #[test]

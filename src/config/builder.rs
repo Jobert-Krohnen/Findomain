@@ -363,6 +363,9 @@ fn monitoring(cli: &Cli, settings: &Settings) -> Monitoring {
         slack_webhook: settings.string("slack_webhook", ""),
         telegram: telegram(settings),
         smart_alerts_webhook: settings.string("smart_alerts_webhook", ""),
+        webhook_max_wait: cli
+            .webhook_max_wait
+            .unwrap_or_else(|| settings.parse("webhook_max_wait", 0)),
     }
 }
 

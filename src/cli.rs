@@ -66,6 +66,10 @@ pub struct Cli {
     #[clap(long = "query-database", conflicts_with = "monitoring_flag")]
     pub query_database: bool,
 
+    /// Seconds to keep waiting on a webhook's rate limit for one message before dropping it. 0 waits for as long as the service asks. Default 0
+    #[clap(long = "webhook-max-wait")]
+    pub webhook_max_wait: Option<u64>,
+
     /// Import subdomains from one or multiple files. Subdomains need to be one per line in the file to import.
     #[clap(long = "import-subdomains", num_args = 1..)]
     pub import_subdomains: Vec<String>,

@@ -65,6 +65,10 @@ Remove informative messages but show fatal errors or subdomains not found messag
 .IP
 Query the findomain database to search subdomains that have already been discovered
 .HP
+\fB\-\-webhook\-max\-wait\fR <WEBHOOK_MAX_WAIT>
+.IP
+Seconds to keep waiting on a webhook's rate limit for one message before dropping it. 0 waits for as long as the service asks. Default 0
+.HP
 \fB\-\-import\-subdomains\fR <IMPORT_SUBDOMAINS>...
 .IP
 Import subdomains from one or multiple files. Subdomains need to be one per line in the file to import

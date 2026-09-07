@@ -451,6 +451,9 @@ pub struct Monitoring {
     /// subdomain alerts. Discord or Slack, told apart by the URL. Empty sends
     /// them to the destinations above.
     pub smart_alerts_webhook: String,
+    /// Seconds to keep waiting on a webhook's rate limit for one message
+    /// before dropping it; 0 waits for as long as the service asks.
+    pub webhook_max_wait: u64,
 }
 
 impl Monitoring {
