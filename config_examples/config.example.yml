@@ -21,6 +21,9 @@ slack_webhook: ""
 telegrambot_token: ""
 # Telegram chat ID
 telegram_chat_id: ""
+# Webhook that receives nuclei findings instead of the ones above, so they can
+# land in their own channel. Discord or Slack, told apart by the URL
+smart_alerts_webhook: ""
 # SMTP server used to email the monitoring report
 smtp_server: ""
 # SMTP port. 465 uses implicit TLS, anything else STARTTLS. Default 587
@@ -71,7 +74,7 @@ nuclei_tags: ""
 nuclei_exclude_templates: ""
 # nuclei rate limit in requests per second. 0 lets nuclei decide
 nuclei_rate_limit: ""
-# Seconds the nuclei scan may take. Default 5400
+# Seconds nuclei may run before it is stopped, keeping what it found by then. 0 for no limit. Default 0
 nuclei_timeout: ""
 # Extra arguments passed to nuclei verbatim, one per entry
 nuclei_args: []

@@ -361,7 +361,9 @@ pub fn manage_subdomains_data(config: &Config, session: &mut Session) -> Result<
 
     if config.needs_network_checks() {
         let resolv_data = resolve::resolve_all(config, session, output_file.as_ref())?;
-        report_findings(&tools::scan_live_hosts(config, &resolv_data));
+        // Findings print as nuclei reports them; nothing else to do with them
+        // outside monitoring mode.
+        report_paths(&tools::scan_live_hosts(config, &resolv_data, &mut |_| {}));
     } else {
         let mut sink = output::Sink::new(output_file.as_ref());
         for subdomain in &session.subdomains {
@@ -398,11 +400,11 @@ pub fn pause_between_targets(config: &Config, is_last_target: bool, leading_blan
     thread::sleep(Duration::from_secs(config.general.rate_limit));
 }
 
-/// Prints what the optional scanners found, if anything.
-pub fn report_findings(findings: &tools::Findings) {
-    for vulnerability in &findings.vulnerabilities {
-        println!("{vulnerability}");
-    }
+/// Prints the paths ffuf found, if any.
+///
+/// nuclei findings are not printed here: they were already printed one by one
+/// as nuclei reported them.
+pub fn report_paths(findings: &tools::Findings) {
     for path in &findings.paths {
         println!("{path}");
     }

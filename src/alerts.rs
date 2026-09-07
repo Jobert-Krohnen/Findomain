@@ -10,7 +10,7 @@ use {
         resolve::{self, ResolvData},
         runner,
         session::Session,
-        tools,
+        tools::{self, nuclei},
         utils::random_from,
         webhooks::{self, Message},
     },
@@ -45,22 +45,34 @@ pub fn subdomains_alerts(config: &Config, session: &mut Session) -> Result<()> {
     let resolv_data = resolve::resolve_all(config, session, output_file.as_ref())?;
     let new_subdomains = summarize(config, &resolv_data);
 
-    let findings = tools::scan_live_hosts(config, &resolv_data);
-    runner::report_findings(&findings);
+    let monitoring = &config.monitoring;
+    let client = monitoring.enabled.then(webhook_client);
+
+    // Each actionable finding is pushed the moment nuclei reports it. A scan
+    // can run for hours, and a critical finding at minute two should not wait
+    // for the end of it. Informational findings are printed and emailed but
+    // kept out of the chat, which stops being read once it fills with them.
+    let target = session.target.clone();
+    let findings = tools::scan_live_hosts(config, &resolv_data, &mut |finding| {
+        if let Some(client) = client.as_ref().filter(|_| monitoring.alerts_on_findings()) {
+            if finding.is_actionable() {
+                alert_finding(config, client, &target, finding);
+            }
+        }
+    });
+    runner::report_paths(&findings);
 
     if config.output.enabled && !new_subdomains.is_empty() {
         write_new_subdomains(config, session, &new_subdomains)?;
     }
 
-    let monitoring = &config.monitoring;
     let store_silently = monitoring.no_monitor && !monitoring.enabled;
-    let nothing_new =
-        new_subdomains.is_empty() && !resolv_data.is_empty() && !monitoring.push_when_empty;
+    let news = is_news(!new_subdomains.is_empty(), monitoring.push_when_empty);
 
-    if store_silently || nothing_new {
+    if store_silently || (!news && !resolv_data.is_empty()) {
         database::commit(config, &session.target, &resolv_data)?;
-    } else if monitoring.push_when_empty || !new_subdomains.is_empty() {
-        push_to_webhooks(config, session, &new_subdomains, &resolv_data)?;
+    } else if let (true, Some(client)) = (news, &client) {
+        push_to_webhooks(config, client, session, &new_subdomains, &resolv_data)?;
     }
 
     // Last and never fatal: the results are already persisted and pushed.
@@ -68,6 +80,34 @@ pub fn subdomains_alerts(config: &Config, session: &mut Session) -> Result<()> {
 
     runner::pause_between_targets(config, session.is_last_target, true);
     Ok(())
+}
+
+/// Whether the end of the run has something to say about subdomains.
+///
+/// Findings do not count here: each one was already sent on its own when
+/// nuclei reported it, so the closing alert only covers what is new by name.
+const fn is_news(has_new_subdomains: bool, push_when_empty: bool) -> bool {
+    push_when_empty || has_new_subdomains
+}
+
+/// The HTTP client every webhook post goes through.
+fn webhook_client() -> Client {
+    Client::builder()
+        .timeout(WEBHOOK_TIMEOUT)
+        .build()
+        .expect("build the webhook HTTP client")
+}
+
+/// Posts one finding to every configured webhook, right away.
+///
+/// Never fatal: a chat service that is down must not stop the scan that is
+/// finding things, and the emailed report at the end carries the full list.
+fn alert_finding(config: &Config, client: &Client, target: &str, finding: &nuclei::Finding) {
+    for message in webhooks::finding_messages(config, &finding.to_string(), target) {
+        if let Err(e) = post(config, client, &message) {
+            eprintln!("Could not send the finding to {}: {e}", message.url);
+        }
+    }
 }
 
 /// Emails the run's findings, when SMTP was configured.
@@ -145,18 +185,15 @@ fn write_new_subdomains(
 /// Posts every alert and stores the results once the first one goes through.
 fn push_to_webhooks(
     config: &Config,
+    client: &Client,
     session: &Session,
     new_subdomains: &HashSet<String>,
     resolv_data: &HashMap<String, ResolvData>,
 ) -> Result<()> {
-    let client = Client::builder()
-        .timeout(WEBHOOK_TIMEOUT)
-        .build()
-        .expect("build the webhook HTTP client");
     let mut stored = false;
 
     for message in webhooks::messages(config, new_subdomains, &session.target) {
-        if !post(config, &client, &message)? {
+        if !post(config, client, &message)? {
             continue;
         }
         if !stored && !new_subdomains.is_empty() {
@@ -223,6 +260,15 @@ mod tests {
         assert!(accepted(StatusCode::GATEWAY_TIMEOUT, true));
         assert!(!accepted(StatusCode::INTERNAL_SERVER_ERROR, true));
         assert!(!accepted(StatusCode::FORBIDDEN, true));
+    }
+
+    #[test]
+    fn the_closing_alert_is_about_new_subdomains() {
+        assert!(is_news(true, false));
+        // Nothing new and not asked to report emptiness: just store.
+        assert!(!is_news(false, false));
+        // --aempty reports either way.
+        assert!(is_news(false, true));
     }
 
     #[test]

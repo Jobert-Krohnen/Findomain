@@ -295,6 +295,10 @@ pub struct Cli {
     #[clap(long = "nuclei-rate-limit")]
     pub nuclei_rate_limit: Option<usize>,
 
+    /// Seconds nuclei may run before it is stopped, keeping what it found by then. 0 for no limit. Default 0
+    #[clap(long = "nuclei-timeout")]
+    pub nuclei_timeout: Option<u64>,
+
     /// Run ffuf against the subdomains with an active HTTP server.
     #[clap(long = "ffuf")]
     pub ffuf: bool,

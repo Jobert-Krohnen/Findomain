@@ -33,7 +33,12 @@ const DEFAULT_HOST_TIMEOUT: u64 = 900;
 /// Default seconds a whole external scan may take.
 const DEFAULT_SCAN_TIMEOUT: u64 = 3600;
 /// Default seconds nuclei and ffuf may each run for.
-const DEFAULT_TOOL_TIMEOUT: u64 = 5400;
+/// nuclei streams its findings as it goes and keeps them when stopped, so a
+/// deadline only ever costs results; it is opt-in.
+const DEFAULT_NUCLEI_TIMEOUT: u64 = 0;
+/// ffuf writes its report on exit, so a run that is cut short has nothing to
+/// show; it keeps a generous ceiling.
+const DEFAULT_FFUF_TIMEOUT: u64 = 5400;
 /// Default concurrent ffuf requests.
 const DEFAULT_FFUF_THREADS: usize = 40;
 /// Default SMTP submission port.
@@ -260,7 +265,9 @@ fn nuclei(cli: &Cli, settings: &Settings) -> Nuclei {
         rate_limit: cli
             .nuclei_rate_limit
             .unwrap_or_else(|| settings.parse("nuclei_rate_limit", 0)),
-        timeout: settings.parse("nuclei_timeout", DEFAULT_TOOL_TIMEOUT),
+        timeout: cli
+            .nuclei_timeout
+            .unwrap_or_else(|| settings.parse("nuclei_timeout", DEFAULT_NUCLEI_TIMEOUT)),
         extra_args: extra_args(&cli.nuclei_args, settings, "nuclei_args"),
     }
 }
@@ -279,7 +286,7 @@ fn ffuf(cli: &Cli, settings: &Settings) -> Ffuf {
         recursion_depth: cli
             .ffuf_recursion_depth
             .unwrap_or_else(|| settings.parse("ffuf_recursion_depth", 2)),
-        timeout: settings.parse("ffuf_timeout", DEFAULT_TOOL_TIMEOUT),
+        timeout: settings.parse("ffuf_timeout", DEFAULT_FFUF_TIMEOUT),
         extra_args: extra_args(&cli.ffuf_args, settings, "ffuf_args"),
     }
 }
@@ -355,6 +362,7 @@ fn monitoring(cli: &Cli, settings: &Settings) -> Monitoring {
         discord_webhook: settings.string("discord_webhook", ""),
         slack_webhook: settings.string("slack_webhook", ""),
         telegram: telegram(settings),
+        smart_alerts_webhook: settings.string("smart_alerts_webhook", ""),
     }
 }
 

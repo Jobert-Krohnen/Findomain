@@ -25,6 +25,18 @@ pub enum Webhook {
 }
 
 impl Webhook {
+    /// Guesses the service behind a bare webhook URL.
+    ///
+    /// Only Discord and Slack can be addressed by URL alone; Telegram needs a
+    /// chat id as well, so it never arrives this way.
+    fn from_url(url: &str) -> Self {
+        if url.contains("discord") {
+            Self::Discord
+        } else {
+            Self::Slack
+        }
+    }
+
     /// Largest payload the service accepts, minus room for the markup.
     const fn max_payload_len(self) -> usize {
         match self {
@@ -84,13 +96,25 @@ impl Webhook {
             .map(|payload| self.monospace(payload))
             .collect()
     }
+
+    /// Builds the message for a single finding, sent the moment it appears.
+    ///
+    /// One finding is far below any service's limit, so there is nothing to
+    /// split; the heading keeps it from reading like a hostname.
+    #[must_use]
+    pub fn finding_payload(self, finding: &str, target: &str) -> String {
+        self.monospace(&format!(
+            "{} {target}\n{finding}",
+            self.bold("Findomain finding:")
+        ))
+    }
 }
 
-/// Builds every alert to send for this run, one per configured destination.
-#[must_use]
-pub fn messages(config: &Config, new_subdomains: &HashSet<String>, target: &str) -> Vec<Message> {
+/// The configured chat destinations with the fields each one needs on top of
+/// the text.
+fn destinations(config: &Config) -> Vec<(Webhook, String, HashMap<&'static str, String>)> {
     let monitoring = &config.monitoring;
-    let mut destinations: Vec<(Webhook, String, HashMap<&'static str, String>)> = Vec::new();
+    let mut destinations = Vec::new();
 
     if !monitoring.discord_webhook.is_empty() {
         destinations.push((
@@ -118,19 +142,65 @@ pub fn messages(config: &Config, new_subdomains: &HashSet<String>, target: &str)
     }
 
     destinations
+}
+
+/// Wraps `payload` as a ready to POST message for one destination.
+fn message(
+    webhook: Webhook,
+    url: &str,
+    extra: &HashMap<&'static str, String>,
+    payload: String,
+) -> Message {
+    let mut body = extra.clone();
+    body.insert(webhook.text_field(), payload);
+    Message {
+        url: url.to_owned(),
+        body,
+    }
+}
+
+/// Where a finding goes: the dedicated webhook when one is configured, so
+/// that vulnerabilities can land in a different channel from the daily
+/// subdomain traffic, else every regular destination.
+fn finding_destinations(config: &Config) -> Vec<(Webhook, String, HashMap<&'static str, String>)> {
+    let dedicated = &config.monitoring.smart_alerts_webhook;
+    if dedicated.is_empty() {
+        return destinations(config);
+    }
+    vec![(
+        Webhook::from_url(dedicated),
+        dedicated.clone(),
+        HashMap::new(),
+    )]
+}
+
+/// Builds the alert for one finding, one message per destination.
+#[must_use]
+pub fn finding_messages(config: &Config, finding: &str, target: &str) -> Vec<Message> {
+    finding_destinations(config)
+        .into_iter()
+        .map(|(webhook, url, extra)| {
+            message(
+                webhook,
+                &url,
+                &extra,
+                webhook.finding_payload(finding, target),
+            )
+        })
+        .collect()
+}
+
+/// Builds the end of run alert, one message per chunk per configured
+/// destination.
+#[must_use]
+pub fn messages(config: &Config, new_subdomains: &HashSet<String>, target: &str) -> Vec<Message> {
+    destinations(config)
         .into_iter()
         .flat_map(|(webhook, url, extra)| {
             webhook
                 .payloads(new_subdomains, target)
                 .into_iter()
-                .map(move |payload| {
-                    let mut body = extra.clone();
-                    body.insert(webhook.text_field(), payload);
-                    Message {
-                        url: url.clone(),
-                        body,
-                    }
-                })
+                .map(|payload| message(webhook, &url, &extra, payload))
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -179,6 +249,94 @@ mod tests {
         for host in &found {
             assert!(joined.contains(host), "{host} was dropped");
         }
+    }
+
+    #[test]
+    fn a_finding_is_announced_as_a_finding_in_every_markup() {
+        let line = "[high] https://a.example.com/admin Exposed panel (exposed-panel)";
+        assert_eq!(
+            Webhook::Discord.finding_payload(line, "example.com"),
+            format!("```**Findomain finding:** example.com\n{line}```")
+        );
+        assert_eq!(
+            Webhook::Slack.finding_payload(line, "example.com"),
+            format!("```*Findomain finding:* example.com\n{line}```")
+        );
+        assert_eq!(
+            Webhook::Telegram.finding_payload(line, "example.com"),
+            format!("<code><b>Findomain finding:</b> example.com\n{line}</code>")
+        );
+    }
+
+    #[test]
+    fn a_finding_goes_to_every_destination_with_its_own_fields() {
+        let mut config = Config::default();
+        config.monitoring.discord_webhook = "https://discord.test/hook".to_owned();
+        config.monitoring.telegram = Some(Telegram {
+            webhook: "https://telegram.test/hook".to_owned(),
+            chat_id: "42".to_owned(),
+        });
+
+        let messages = finding_messages(&config, "[critical] x RCE (cve)", "example.com");
+        assert_eq!(
+            messages.len(),
+            2,
+            "one message per destination, no chunking"
+        );
+
+        let discord = messages
+            .iter()
+            .find(|m| m.url.contains("discord"))
+            .expect("discord");
+        assert!(discord.body["content"].contains("RCE (cve)"));
+
+        let telegram = messages
+            .iter()
+            .find(|m| m.url.contains("telegram"))
+            .expect("telegram");
+        assert_eq!(telegram.body["chat_id"], "42");
+        assert_eq!(telegram.body["parse_mode"], "HTML");
+        assert!(telegram.body["text"].contains("<b>Findomain finding:</b>"));
+    }
+
+    #[test]
+    fn a_finding_with_no_destinations_goes_nowhere() {
+        assert!(finding_messages(&Config::default(), "[high] x", "example.com").is_empty());
+    }
+
+    #[test]
+    fn a_dedicated_webhook_takes_the_findings_away_from_the_subdomain_channels() {
+        let mut config = Config::default();
+        config.monitoring.discord_webhook = "https://discord.test/recon".to_owned();
+        config.monitoring.slack_webhook = "https://slack.test/recon".to_owned();
+        config.monitoring.smart_alerts_webhook = "https://hooks.slack.test/security".to_owned();
+
+        let messages = finding_messages(&config, "[critical] x RCE (cve)", "example.com");
+        assert_eq!(messages.len(), 1, "only the dedicated channel");
+        assert_eq!(messages[0].url, "https://hooks.slack.test/security");
+        assert!(messages[0].body["text"].starts_with("```*Findomain finding:*"));
+
+        // The subdomain summary is unaffected by it.
+        let summary = super::messages(&config, &subdomains(1), "example.com");
+        assert!(summary.iter().all(|m| !m.url.contains("security")));
+        assert_eq!(summary.len(), 2 * 2);
+    }
+
+    #[test]
+    fn the_dedicated_webhook_service_is_told_from_its_url() {
+        assert_eq!(
+            Webhook::from_url("https://discord.com/api/webhooks/1/x"),
+            Webhook::Discord
+        );
+        assert_eq!(
+            Webhook::from_url("https://hooks.slack.com/services/T/B/x"),
+            Webhook::Slack
+        );
+        // Unknown hosts get Slack's plain "text" field, the more common shape.
+        assert_eq!(
+            Webhook::from_url("https://example.test/hook"),
+            Webhook::Slack
+        );
     }
 
     #[test]

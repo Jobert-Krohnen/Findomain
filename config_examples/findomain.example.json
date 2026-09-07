@@ -6,6 +6,7 @@
     "slack_webhook": "",
     "telegrambot_token": "",
     "telegram_chat_id": "",
+    "smart_alerts_webhook": "",
     "smtp_server": "",
     "smtp_port": "",
     "smtp_user": "",

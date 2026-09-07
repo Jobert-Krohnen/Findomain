@@ -5,7 +5,7 @@
 //! user's control: this is a pipe, not a policy.
 
 use {
-    super::{run_with_stdin, ToolError},
+    super::{stream, ToolError},
     crate::config::Config,
     serde::Deserialize,
     std::fmt,
@@ -58,23 +58,49 @@ impl Finding {
     }
 }
 
-/// Runs nuclei against `targets` and returns everything it found.
+/// Runs nuclei against `targets`, handing each finding to `on_finding` as
+/// nuclei reports it, and returns all of them once it is done.
+///
+/// nuclei writes one JSON object per line as it goes, so there is no reason
+/// to sit on the results until it exits: a scan can run for hours. When
+/// `nuclei_timeout` is set and runs out, nuclei is stopped and whatever it had
+/// found by then is kept and returned, with a note on stderr that the scan
+/// was cut short.
 ///
 /// # Errors
 ///
 /// Fails when nuclei is missing or cannot be executed.
-pub fn scan(config: &Config, targets: &[String]) -> Result<Vec<Finding>, ToolError> {
+pub fn scan(
+    config: &Config,
+    targets: &[String],
+    on_finding: &mut dyn FnMut(&Finding),
+) -> Result<Vec<Finding>, ToolError> {
     if targets.is_empty() {
         return Ok(Vec::new());
     }
 
-    let output = run_with_stdin(
+    let mut found = Vec::new();
+    let completion = stream(
         "nuclei",
         &arguments(config),
         config.nuclei.timeout,
         Some(&targets.join("\n")),
+        &mut |line| {
+            if let Some(finding) = parse_line(line) {
+                on_finding(&finding);
+                found.push(finding);
+            }
+        },
     )?;
-    Ok(parse(&output))
+
+    if completion.timed_out {
+        eprintln!(
+            "nuclei was stopped after {} seconds; keeping the {} finding(s) it reported before that. Raise nuclei_timeout, or set it to 0 for no limit.",
+            config.nuclei.timeout,
+            found.len()
+        );
+    }
+    Ok(found)
 }
 
 /// Builds the nuclei command line.
@@ -112,13 +138,22 @@ fn arguments(config: &Config) -> Vec<String> {
     args
 }
 
-/// Reads the JSONL nuclei writes, skipping lines it cannot understand.
+/// Reads one line of the JSONL nuclei writes, or `None` for anything else.
+///
+/// nuclei prints progress and warnings on the same stream when it feels like
+/// it; a line that is not a JSON object is not a finding.
+fn parse_line(line: &str) -> Option<Finding> {
+    let line = line.trim_start();
+    if !line.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str::<Finding>(line).ok()
+}
+
+/// Reads every finding out of a complete JSONL document.
+#[cfg(test)]
 fn parse(output: &str) -> Vec<Finding> {
-    output
-        .lines()
-        .filter(|line| line.trim_start().starts_with('{'))
-        .filter_map(|line| serde_json::from_str::<Finding>(line).ok())
-        .collect()
+    output.lines().filter_map(parse_line).collect()
 }
 
 #[cfg(test)]
@@ -227,7 +262,21 @@ mod tests {
 
     #[test]
     fn scanning_nothing_does_not_run_the_tool() {
-        let findings = scan(&Config::default(), &[]).expect("no work is not a failure");
+        let mut seen = 0;
+        let findings =
+            scan(&Config::default(), &[], &mut |_| seen += 1).expect("no work is not a failure");
         assert!(findings.is_empty());
+        assert_eq!(seen, 0);
+    }
+
+    #[test]
+    fn a_line_is_a_finding_only_when_it_is_a_json_object() {
+        assert!(parse_line("[INF] Using nuclei-templates v9").is_none());
+        assert!(parse_line("").is_none());
+        assert!(parse_line("{not json").is_none());
+        let finding =
+            parse_line(r#"  {"template-id":"t","info":{"name":"n","severity":"high"},"host":"h"}"#)
+                .expect("leading whitespace is fine");
+        assert_eq!(finding.template_id, "t");
     }
 }

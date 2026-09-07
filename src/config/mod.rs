@@ -286,7 +286,8 @@ pub struct Nuclei {
     pub exclude_templates: String,
     /// Requests per second; 0 leaves the decision to nuclei.
     pub rate_limit: usize,
-    /// Seconds the whole scan may take before it is killed.
+    /// Seconds the scan may run before nuclei is stopped; 0 for no limit.
+    /// Findings reported before the stop are kept.
     pub timeout: u64,
     /// Extra arguments handed to nuclei verbatim.
     pub extra_args: Vec<String>,
@@ -446,9 +447,19 @@ pub struct Monitoring {
     pub discord_webhook: String,
     pub slack_webhook: String,
     pub telegram: Option<Telegram>,
+    /// Where nuclei findings go, when they should not share a channel with the
+    /// subdomain alerts. Discord or Slack, told apart by the URL. Empty sends
+    /// them to the destinations above.
+    pub smart_alerts_webhook: String,
 }
 
 impl Monitoring {
+    /// Reports whether a nuclei finding has anywhere to go.
+    #[must_use]
+    pub fn alerts_on_findings(&self) -> bool {
+        !self.smart_alerts_webhook.is_empty() || self.has_webhooks()
+    }
+
     /// Reports whether results should be persisted to the database.
     #[must_use]
     pub const fn uses_database(&self) -> bool {
