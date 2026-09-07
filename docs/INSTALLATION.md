@@ -184,6 +184,9 @@ You have two options to install Findomain in a docker container.
 
 **Using Dockerhub:**
 
+The image is built for `linux/amd64` and `linux/arm64`, and every release is
+tagged both as `latest` and by its version, so you can pin one.
+
 ```
 $ docker pull edu4rdshl/findomain:latest
 $ docker run --rm edu4rdshl/findomain:latest -t example.com

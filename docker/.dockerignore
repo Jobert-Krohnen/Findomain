@@ -1,0 +1,4 @@
+# Only the staged binaries and the Dockerfile belong in the build context.
+*
+!bin/
+!bin/**

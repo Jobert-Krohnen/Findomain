@@ -10,3 +10,6 @@ configtest.toml
 /sshots
 # Right now ARM builds fails on the first attempt, so we need to retry...
 armbuilder.sh
+
+# Binaries staged for the Docker build, never committed.
+docker/bin/
